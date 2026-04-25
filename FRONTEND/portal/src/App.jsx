@@ -14,11 +14,14 @@ function MedicalReportAgent() {
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [alerts, setAlerts] = useState([]);
+  const [isVoiceConversationActive, setIsVoiceConversationActive] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
 
   const fileInputRef = useRef(null);
   const recognitionRef = useRef(null);
   const chatAreaRef = useRef(null);
+  const finalTranscriptRef = useRef('');
 
   const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
 
@@ -407,10 +410,10 @@ Extract from the attached file/image and return JSON only.`;
     }
   };
 
-  const sendChat = async () => {
-    if (!chatInput.trim() || !reportSummary || isChatLoading) return;
+  const sendChat = async (messageToSend) => {
+    const userMessage = messageToSend || chatInput.trim();
+    if (!userMessage || !reportSummary || isChatLoading) return;
 
-    const userMessage = chatInput.trim();
     setChatInput('');
     setMessages(prev => [...prev, { role: 'user', text: userMessage }]);
     setIsChatLoading(true);
@@ -469,7 +472,11 @@ ${userMessage}`;
 
       setMessages(prev => prev.filter(m => m.role !== 'thinking'));
       setMessages(prev => [...prev, { role: 'agent', text: finalReply }]);
-      speak(finalReply);
+      speak(finalReply, () => {
+        if (isVoiceConversationActive) {
+          setTimeout(() => toggleMic(), 500);
+        }
+      });
     } catch (error) {
       setMessages(prev => prev.filter(m => m.role !== 'thinking'));
       setMessages(prev => [...prev, { role: 'agent', text: 'Error: ' + error.message }]);
@@ -494,23 +501,38 @@ ${userMessage}`;
     return cleaned;
   };
 
-  const speak = (text) => {
+  const speak = (text, onEndCallback) => {
     if (!window.speechSynthesis) return;
 
-    const cleanedText = cleanTextForSpeech(text);
-    window.speechSynthesis.cancel();
+    if (isSpeaking) {
+      window.speechSynthesis.cancel();
+      setIsSpeaking(false);
+      return;
+    }
 
+    const cleanedText = cleanTextForSpeech(text);
     const utterance = new SpeechSynthesisUtterance(cleanedText);
+
+    utterance.onstart = () => setIsSpeaking(true);
+    utterance.onend = () => {
+      setIsSpeaking(false);
+      if (onEndCallback) {
+        onEndCallback();
+      }
+    };
+    utterance.onerror = () => {
+      setIsSpeaking(false);
+      if (onEndCallback) {
+        onEndCallback();
+      }
+    };
 
     const setVoiceAndSpeak = () => {
       const voices = window.speechSynthesis.getVoices();
-
       let selectedVoice = null;
 
       if (lang === 'kn') {
         utterance.lang = 'kn-IN';
-
-        // Try Kannada voice first, then Indian-language fallbacks.
         selectedVoice =
           voices.find(v => v.lang === 'kn-IN') ||
           voices.find(v => v.lang.startsWith('kn')) ||
@@ -519,7 +541,6 @@ ${userMessage}`;
           voices.find(v => v.lang.startsWith('en'));
       } else {
         utterance.lang = 'en-IN';
-
         selectedVoice =
           voices.find(v => v.lang === 'en-IN') ||
           voices.find(v => v.lang.startsWith('en'));
@@ -535,13 +556,18 @@ ${userMessage}`;
       window.speechSynthesis.speak(utterance);
     };
 
-    // Ensure voices are loaded before speaking.
     if (window.speechSynthesis.getVoices().length === 0) {
       window.speechSynthesis.onvoiceschanged = setVoiceAndSpeak;
     } else {
       setVoiceAndSpeak();
     }
+  };
 
+  const stopSpeaking = () => {
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+      setIsSpeaking(false);
+    }
   };
 
   const toggleMic = () => {
@@ -572,10 +598,16 @@ ${userMessage}`;
       const transcript = Array.from(event.results)
         .map(result => result[0].transcript)
         .join('');
-      setChatInput(transcript);
+      finalTranscriptRef.current = transcript;
     };
 
-    recognition.onend = () => setIsListening(false);
+    recognition.onend = () => {
+      setIsListening(false);
+      if (finalTranscriptRef.current) {
+        sendChat(finalTranscriptRef.current);
+        finalTranscriptRef.current = '';
+      }
+    };
     recognition.onerror = () => setIsListening(false);
 
     recognition.start();
@@ -729,14 +761,54 @@ ${userMessage}`;
               <p className="text-sm leading-relaxed text-gray-800 whitespace-pre-wrap">
                 {reportSummary}
               </p>
-              <button
-                onClick={() => speak(reportSummary)}
-                className="mt-4 px-4 py-2 rounded-full border border-gray-300 text-sm text-gray-600 hover:bg-gray-50 transition-colors flex items-center gap-2"
-              >
-                <Volume2 className="w-4 h-4" />
-                {t.readAloud}
-              </button>
+              <div className="flex gap-4 mt-4">
+                <button
+                  onClick={() => isSpeaking ? stopSpeaking() : speak(reportSummary)}
+                  className="px-4 py-2 rounded-full border border-gray-300 text-sm text-gray-600 hover:bg-gray-50 transition-colors flex items-center gap-2"
+                >
+                  <Volume2 className="w-4 h-4" />
+                  {isSpeaking ? 'Stop' : t.readAloud}
+                </button>
+                <button
+                  onClick={() => setIsVoiceConversationActive(true)}
+                  className="px-4 py-2 rounded-full border border-emerald-300 bg-emerald-50 text-sm text-emerald-700 hover:bg-emerald-100 transition-colors flex items-center gap-2"
+                >
+                  <Mic className="w-4 h-4" />
+                  Start Voice Conversation
+                </button>
+              </div>
             </div>
+
+            {isVoiceConversationActive && (
+              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                <div className="bg-white rounded-2xl p-8 max-w-lg w-full">
+                  <h2 className="text-2xl font-bold mb-4">Voice Conversation</h2>
+                  <p className="text-gray-600 mb-6">Ask me anything about your report. I'm listening.</p>
+                  <div className="flex justify-center gap-4">
+                    <button
+                      onClick={toggleMic}
+                      className={`w-24 h-24 rounded-full flex items-center justify-center transition-all ${
+                        isListening ? 'bg-orange-500 animate-pulse' : 'bg-emerald-600 hover:bg-emerald-700'
+                      }`}
+                    >
+                      <Mic className="w-10 h-10 text-white" />
+                    </button>
+                    <button
+                      onClick={() => {
+                        setIsVoiceConversationActive(false);
+                        if (isListening) {
+                          toggleMic();
+                        }
+                      }}
+                      className="w-24 h-24 rounded-full flex items-center justify-center bg-red-600 hover:bg-red-700 text-white"
+                    >
+                      Stop
+                    </button>
+                  </div>
+                  {chatInput && <p className="mt-4 text-center text-gray-500">You said: {chatInput}</p>}
+                </div>
+              </div>
+            )}
 
             <div className="mt-6 bg-white border border-gray-200 rounded-2xl p-6">
               <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-4">
@@ -758,11 +830,11 @@ ${userMessage}`;
                       {msg.text}
                       {msg.role === 'agent' && (
                         <button
-                          onClick={() => speak(msg.text)}
+                          onClick={() => isSpeaking ? stopSpeaking() : speak(msg.text)}
                           className="mt-2 px-3 py-1 rounded-full border border-gray-300 text-xs text-gray-600 hover:bg-gray-50 transition-colors flex items-center gap-1"
                         >
                           <Volume2 className="w-3 h-3" />
-                          {t.readAloud}
+                          {isSpeaking ? 'Stop' : t.readAloud}
                         </button>
                       )}
                     </div>
